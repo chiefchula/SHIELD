@@ -8,6 +8,7 @@ library(janitor)
 library(labelled)
 library(ggplot2)
 library(leaflet)
+library(stringr)
 
 # credentials
 usethis::edit_r_environ()
@@ -24,4 +25,6 @@ shield_raw <- kobo_data(form_uid, lang = "English (en)")
 # Cleaning ---------------------------------------------------------------------
 shield_cleaned <- shield_raw |> 
   remove_constant() |> 
-  mutate(across(where(is.labelled), ~ haven::as_factor(.x, levels = "labels")))
+  mutate(across(where(is.labelled), ~ haven::as_factor(.x, levels = "labels"))) |> 
+  mutate(across(.cols = c("health_area", "health_zone", "village", "respondent_name"), .fns = ~ str_to_title(.))) |> 
+  mutate(phone_number_cleaned = str_remove_all(phone_number, "[:space:]\\+"), .after = phone_number)
