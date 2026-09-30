@@ -1,47 +1,25 @@
+library(robotoolbox)
 library(dplyr)
 library(tidyr)
-library(robotoolbox)
-library(readr)
-library(readxl)
-library(rlang)
-library(janitor)
-library(labelled)
-library(ggplot2)
-library(leaflet)
-library(stringr)
 library(purrr)
+library(tibble)
 
-# credentials
-usethis::edit_r_environ()
+# ---- 1. credentials ---------------------------------------------------------
+# Do NOT use Sys.getenv() here unless you've set the variable
+# for the Power BI service account. Paste the token instead.
+kobo_setup(
+  url   = "https://kf.kobotoolbox.org/",
+  token = "0b54751849b3c8e8d7d57948f3695edd9d7d2cb8"
+)
 
-kobo_url <- Sys.getenv("KOBOTOOLBOX_URL")
-kobo_token <- Sys.getenv("KOBOTOOLBOX_TOKEN")
+asset <- kobo_asset("adZCkYBD5roeAMPNd2NubN")
+shield_cleaned <- kobo_submissions(asset)
 
-form_uid <- 'adZCkYBD5roeAMPNd2NubN'
+stopifnot(is.data.frame(shield_cleaned), nrow(shield_cleaned) > 0)
 
-kobo_lang(form_uid)
-
-shield_raw <- kobo_data(form_uid, lang = "English (en)")
-
-# Cleaning ---------------------------------------------------------------------
-shield_cleaned <- shield_raw |> 
-  remove_constant() |> 
-  mutate(across(where(is.labelled), ~ haven::as_factor(.x, levels = "labels"))) |> 
-  mutate(across(.cols = c("health_area", "health_zone", "village", "respondent_name"), .fns = ~ str_to_title(.))) |> 
-  mutate(phone_number_cleaned = str_remove_all(phone_number, "[:space:]\\+"), .after = phone_number) |> 
-  mutate(new_phone = case_when(
-    str_length(phone_number_cleaned) > 9 ~ paste0("+234", str_sub(phone_number_cleaned, start = -9)),
-    TRUE ~ 'Check number'))
-
-total_responses <- nrow(shield_cleaned)
-
-n_yes <- sum(shield_cleaned$institution_involved_ebola == "Yes", na.rm = TRUE)
-ebola_preparedness <- n_yes / total_responses
-
-trained_on_ebola <- sum(shield_cleaned$leader_ebola_training == "Yes", na.rm = TRUE)
-perc_trained <- trained_on_ebola / total_responses
-
-# Data preparation -------------------------------------------------------------
+# ---- 2. specs (unchanged) ---------------------------------------------------
+geo_cols  <- c("province", "territory", "health_zone", "health_area")
+demo_cols <- c("institution_type", "faith")
 
 bar_specs <- list(
   "Institutional Capacity" = tribble(
@@ -86,11 +64,24 @@ bar_specs <- list(
   )
 )
 
-geo_cols  <- c("province", "territory", "health_zone", "health_area")
-demo_cols <- c("institution_type", "faith")
+# ---- 3. base + builder (unchanged, with the case_when fix) ------------------
+yes_no_to_int <- function(x) {
+  chr <- if (is.factor(x)) {
+    as.character(x)                                    # factor first
+  } else if (inherits(x, "haven_labelled")) {
+    as.character(haven::as_factor(x, levels = "labels"))
+  } else if (is.numeric(x)) {
+    return(as.integer(x > 0))
+  } else if (is.logical(x)) {
+    return(as.integer(x))
+  } else {
+    as.character(x)
+  }
+  
+  chr <- tolower(trimws(chr))
+  as.integer(chr %in% c("yes", "y", "oui", "true", "1"))
+}
 
-
-# ---- safe intermediate names ------------------------------------------------
 resp_base <- shield_cleaned %>%
   transmute(
     respondent_id = `_id`,
@@ -100,28 +91,11 @@ resp_base <- shield_cleaned %>%
     assessment = as.character(assessment)
   )
 
-stopifnot(
-  is.data.frame(shield_cleaned),
-  is.data.frame(resp_base),
-  nrow(shield_cleaned) > 0,
-  nrow(resp_base) == nrow(shield_cleaned)
-)
 
-# ---- builder ----------------------------------------------------------------
 build_block <- function(chart_name, specs) {
   resp_base %>%
     bind_cols(shield_cleaned %>% select(all_of(specs$col))) %>%
-    mutate(across(
-      all_of(specs$col),
-      ~ as.integer(
-        dplyr::case_when(
-          is.na(.x)               ~ 0L,
-          is.numeric(.x)          ~ as.integer(.x > 0),  # 0/1 ints pass through
-          as.character(.x) == "Yes" ~ 1L,
-          TRUE                    ~ 0L
-        )
-      )
-    )) %>%
+    mutate(across(all_of(specs$col), yes_no_to_int)) %>%
     pivot_longer(all_of(specs$col), names_to = "col", values_to = "value") %>%
     left_join(specs, by = "col") %>%
     mutate(
@@ -131,9 +105,8 @@ build_block <- function(chart_name, specs) {
     select(-col)
 }
 
-# ---- preparedness block -----------------------------------------------------
+# ---- 4. assemble ------------------------------------------------------------
 levels_prep <- c("High", "Moderate", "Low")
-
 prep_block <- resp_base %>%                 # was: base
   crossing(category = levels_prep) %>%
   mutate(
@@ -142,16 +115,20 @@ prep_block <- resp_base %>%                 # was: base
     sort_order = match(category, levels_prep)
   )
 
-# ---- assemble ---------------------------------------------------------------
 dash_long <- bind_rows(
   prep_block,
   imap_dfr(bar_specs, ~ build_block(.y, .x))
 ) %>%
-  mutate(chart = factor(chart, levels = c(
-    "Preparedness Level", "Institutional Capacity",
-    "Barriers to Engagement", "Support Required", "KPI"
-  ))) %>%
+  mutate(chart = factor(
+    chart,
+    levels = c(
+      "Preparedness Level",
+      "Institutional Capacity",
+      "Barriers to Engagement",
+      "Support Required",
+      "KPI"
+    )
+  )) %>%
   arrange(chart, sort_order, respondent_id)
 
-dir.create("powerbi_data", showWarnings = FALSE)
-write_csv(dash_long, "powerbi_data/dash_long.csv")
+dash_long
